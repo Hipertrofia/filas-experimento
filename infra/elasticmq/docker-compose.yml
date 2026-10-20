@@ -1,0 +1,10 @@
+# SQS local para desenvolvimento:  docker compose -f infra/elasticmq/docker-compose.yml up -d
+# Endpoint: http://localhost:9324   Painel: http://localhost:9325
+services:
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.7.1
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
