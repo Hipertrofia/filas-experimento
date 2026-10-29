@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 /**
  * Jobs concluídos de uma rodada, já deduplicados, com as fatias reunidas no job pai e o
@@ -50,8 +51,27 @@ record RunData(
         }
     }
 
-    static RunData read(Path file, Duration warmup) throws IOException {
+    /** Um arquivo JSONL, ou um diretório cujos {@code *.jsonl} (um por pod) formam uma só rodada. */
+    static RunData read(Path path, Duration warmup) throws IOException {
+        List<Path> files;
+        if (Files.isDirectory(path)) {
+            try (Stream<Path> s = Files.list(path)) {
+                files = s.filter(p -> p.getFileName().toString().endsWith(".jsonl")).sorted().toList();
+            }
+            if (files.isEmpty()) {
+                throw new IllegalArgumentException(path + ": nenhum .jsonl no diretório");
+            }
+        } else {
+            files = List.of(path);
+        }
         List<Observation> obs = new ArrayList<>();
+        for (Path f : files) {
+            readInto(f, obs);
+        }
+        return of(obs, warmup);
+    }
+
+    private static void readInto(Path file, List<Observation> obs) throws IOException {
         try (BufferedReader r = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
             String line;
             int n = 0;
@@ -67,7 +87,6 @@ record RunData(
                 }
             }
         }
-        return of(obs, warmup);
     }
 
     static RunData of(List<Observation> obs, Duration warmup) {

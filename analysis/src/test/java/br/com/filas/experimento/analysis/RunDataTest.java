@@ -3,7 +3,11 @@ package br.com.filas.experimento.analysis;
 import br.com.filas.experimento.domain.ConsumptionPolicy;
 import br.com.filas.experimento.domain.JobClass;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -91,6 +95,23 @@ class RunDataTest {
         assertEquals(2, d.warmupDiscarded());
         assertEquals(2, d.jobs().size());
         assertEquals(2.0, d.windowSeconds(), 1e-9);
+    }
+
+    @Test
+    void diretorioJuntaOsRegistrosDosPods(@TempDir Path dir) throws IOException {
+        String linha = "{\"job_id\":\"%s\",\"run_id\":\"r\",\"class\":\"NORMAL\",\"size_us\":10,"
+                + "\"enqueue_ts_us\":%d,\"receive_ts_us\":%d,\"start_ts_us\":%d,\"end_ts_us\":%d,"
+                + "\"service_actual_us\":10,\"worker_id\":\"%s\",\"policy\":\"PRIORIDADE\",\"queue\":\"normal\","
+                + "\"receive_count\":1,\"parent_job_id\":\"%s\",\"slice_index\":0,\"slice_count\":1}";
+        UUID a = new UUID(0, 1);
+        UUID b = new UUID(0, 2);
+        Files.writeString(dir.resolve("i-1.jsonl"), String.format(linha, a, T0, T0 + 5, T0 + 5, T0 + 15, "i-1", a));
+        Files.writeString(dir.resolve("i-2.jsonl"), String.format(linha, b, T0 + 1000, T0 + 1000, T0 + 1000,
+                T0 + 1010, "i-2", b));
+        Files.writeString(dir.resolve("i-1.log"), "não é registro");
+        RunData d = RunData.read(dir, Duration.ZERO);
+        assertEquals(2, d.jobs().size());
+        assertEquals(java.util.Set.of("i-1", "i-2"), d.workers());
     }
 
     @Test

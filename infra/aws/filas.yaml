@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Experimento de filas: filas SQS (as mesmas do ElasticMQ de desenvolvimento), pods worker e
+  gerador em EC2 (um grupo de Auto Scaling fixo para cada papel) e bucket S3 para o pacote da
+  aplicação e os registros. Sem portas de entrada: as instâncias são comandadas pelo SSM.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: c7i.large
+    Description: Tipo das instâncias (workers e gerador). Evite tipos t*, cujo crédito de CPU muda a velocidade no meio da rodada.
+  WorkerCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 32
+    Description: Pods worker (c servidores, um job por vez em cada). 0 = desligado.
+  GeneratorCount:
+    Type: Number
+    Default: 0
+    AllowedValues: [0, 1]
+    Description: Instância do gerador. 0 = desligado.
+  ImageId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  VisibilityTimeoutSeconds:
+    Type: Number
+    Default: 30
+    Description: Visibility timeout padrão das filas; precisa ser maior que o maior tempo de serviço.
+
+Resources:
+  # Filas: mesmos nomes e redrive de infra/elasticmq/elasticmq.conf.
+  Dlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: dlq
+      MessageRetentionPeriod: 1209600
+  Prioritaria:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: prioritaria
+      VisibilityTimeout: !Ref VisibilityTimeoutSeconds
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy: { deadLetterTargetArn: !GetAtt Dlq.Arn, maxReceiveCount: 5 }
+  Normal:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: normal
+      VisibilityTimeout: !Ref VisibilityTimeoutSeconds
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy: { deadLetterTargetArn: !GetAtt Dlq.Arn, maxReceiveCount: 5 }
+  Unica:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: unica
+      VisibilityTimeout: !Ref VisibilityTimeoutSeconds
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy: { deadLetterTargetArn: !GetAtt Dlq.Arn, maxReceiveCount: 5 }
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: filas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt Prioritaria.Arn
+                  - !GetAtt Normal.Arn
+                  - !GetAtt Unica.Arn
+                  - !GetAtt Dlq.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub ${Bucket.Arn}/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  # Na VPC padrão; só saída (SQS, S3, SSM e repositório de pacotes).
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: filas-experimento, sem entrada
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }
+        # O chrony do Amazon Linux 2023 já usa o Amazon Time Sync Service (169.254.169.123).
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y java-17-amazon-corretto-headless tar gzip
+            mkdir -p /opt/filas/registros
+            printf 'BUCKET=%s\nREGION=%s\n' '${Bucket}' '${AWS::Region}' > /etc/filas.env
+            # Instância nova (ex.: aumento do WorkerCount) já recebe o último pacote implantado.
+            if aws s3 cp s3://${Bucket}/app/filas.tar.gz /tmp/filas.tar.gz; then
+              mkdir -p /opt/filas/app
+              tar xzf /tmp/filas.tar.gz -C /opt/filas/app
+              find /opt/filas/app -name '*.sh' -exec sed -i 's/\r$//' {} +
+              chmod +x /opt/filas/app/*/bin/* /opt/filas/app/remoto/*.sh
+            fi
+
+  # Todos na mesma zona: a latência até o SQS fica igual para os pods.
+  Workers:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: [!Select [0, !GetAZs '']]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref WorkerCount
+      MaxSize: !Ref WorkerCount
+      DesiredCapacity: !Ref WorkerCount
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-worker', PropagateAtLaunch: true }
+        - { Key: filas-stack, Value: !Ref AWS::StackName, PropagateAtLaunch: true }
+        - { Key: filas-papel, Value: worker, PropagateAtLaunch: true }
+  Gerador:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: [!Select [0, !GetAZs '']]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref GeneratorCount
+      MaxSize: !Ref GeneratorCount
+      DesiredCapacity: !Ref GeneratorCount
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-gerador', PropagateAtLaunch: true }
+        - { Key: filas-stack, Value: !Ref AWS::StackName, PropagateAtLaunch: true }
+        - { Key: filas-papel, Value: gerador, PropagateAtLaunch: true }
+
+Outputs:
+  Bucket:
+    Value: !Ref Bucket
+  PrioritariaUrl:
+    Value: !Ref Prioritaria
+  NormalUrl:
+    Value: !Ref Normal
+  UnicaUrl:
+    Value: !Ref Unica
+  DlqUrl:
+    Value: !Ref Dlq

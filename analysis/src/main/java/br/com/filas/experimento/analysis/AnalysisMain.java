@@ -16,7 +16,7 @@ import java.util.Optional;
 /**
  * Uso:
  * <pre>
- * analysis [opções] &lt;registro.jsonl&gt;...
+ * analysis [opções] &lt;registro.jsonl | diretório&gt;...   (diretório = uma rodada, um .jsonl por pod)
  *   --warmup-s S        descarta os jobs que chegaram nos primeiros S segundos (padrão 0)
  *   --servers C         número de servidores (padrão: workers distintos no registro)
  *   --service B         measured (end − start, padrão) ou nominal (size_us) na teoria
@@ -103,7 +103,7 @@ public final class AnalysisMain {
     private static int usage(String msg) {
         System.err.println("[analysis] " + msg);
         System.err.println("uso: analysis [--warmup-s S] [--servers C] [--service measured|nominal] "
-                + "[--model auto|fifo|priority|none] [--replicas] [--csv ARQ] <registro.jsonl>...");
+                + "[--model auto|fifo|priority|none] [--replicas] [--csv ARQ] <registro.jsonl | diretório>...");
         return 2;
     }
 }

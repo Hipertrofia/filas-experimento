@@ -12,6 +12,7 @@ especificação do worker em `docs/especificacao-worker.md`.
 - `analysis`: leitura do JSONL, métricas por classe e comparação com a teoria.
 - `experiments/`: configs de rodada e traces gerados.
 - `infra/elasticmq/`: SQS local para desenvolvimento (filas `prioritaria`, `normal`, `unica` e `dlq`).
+- `infra/aws/`: filas SQS, pods EC2, checagem de relógio e coleta dos registros (ver `infra/aws/README.md`).
 
 ## Comandos
 
