@@ -9,6 +9,7 @@ especificação do worker em `docs/especificacao-worker.md`.
 - `adapter-sqs`: fila SQS (AWS SDK v2); testado contra ElasticMQ embutido.
 - `worker-app`: configuração, montagem e ciclo de vida (SIGTERM).
 - `generator-app`: trace de Poisson por seed (`generate`) e envio em tempo real (`send`, fase SQS).
+- `analysis`: leitura do JSONL, métricas por classe e comparação com a teoria.
 - `experiments/`: configs de rodada e traces gerados.
 - `infra/elasticmq/`: SQS local para desenvolvimento (filas `prioritaria`, `normal`, `unica` e `dlq`).
 
@@ -63,3 +64,30 @@ Um job atendido por linha. Instantes em epoch e durações em microssegundos int
 `job_id`, `run_id`, `class`, `size_us`, `enqueue_ts_us`, `receive_ts_us`, `start_ts_us`,
 `end_ts_us`, `service_actual_us`, `worker_id`, `policy`, `queue`, `receive_count`,
 `parent_job_id`, `slice_index`, `slice_count`.
+
+## Análise
+
+```
+./gradlew :analysis:installDist
+analysis/build/install/analysis/bin/analysis --warmup-s 5 registros/polling/L-memoria.jsonl
+analysis/build/install/analysis/bin/analysis --warmup-s 30 --replicas --csv registros/resumo.csv r-s1.jsonl r-s2.jsonl r-s3.jsonl
+```
+
+Por arquivo: deduplica por `job_id` (fica a conclusão que terminou primeiro), reúne as fatias no
+job pai, descarta os jobs que chegaram durante o aquecimento (`--warmup-s`) e imprime, por classe,
+n, λ, E[S], E[S²], E[Wq], E[Wq²], p99 de Wq, E[W], E[W²] e p99 de W, em ms. Wq soma as esperas
+(`start − enqueue`) de todas as fatias; W vai da chegada do pai ao fim da última fatia.
+
+A teoria usa os λ e os momentos de serviço medidos na própria rodada (`--service nominal` usa o
+`size_us` do trace) e c = número de workers no registro (`--servers` para mudar):
+
+| Política | c = 1 (exato) | c > 1 (aproximação) |
+|---|---|---|
+| `FIFO_COMPARTILHADO` | Pollaczek–Khinchine; E[Wq²] de Takács | Allen–Cunneen |
+| `PRIORIDADE` | Cobham; E[Wq²] por classe | Bondi–Buzen (exata se as classes têm a mesma média) |
+
+`--model fifo|priority|none` força o modelo, por exemplo para ver quanto a prioridade ganha sobre
+o FIFO na mesma rodada. As outras políticas e os jobs fatiados saem sem teoria. `--replicas`
+agrega os arquivos como réplicas (média e IC de 95% pela t de Student entre rodadas), e `--csv`
+grava uma linha por arquivo e classe. Os testes validam as fórmulas contra um simulador de eventos
+discretos (`QueueSimulator`).

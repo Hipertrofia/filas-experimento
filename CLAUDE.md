@@ -30,7 +30,7 @@ adapter-sqs/     único módulo que conhece o AWS SDK
 worker-app/      ponto de entrada, configuração, montagem dos adaptadores
 generator-app/   fase seguinte: trace Poisson e envio
 experiments/     configs de rodada (política, ρ, seed) e traces
-analysis/        leitura do JSONL e cálculo das métricas
+analysis/        leitura do JSONL, métricas por classe e teoria (P-K, Cobham)
 infra/           reservado: SQS e EC2
 ```
 
