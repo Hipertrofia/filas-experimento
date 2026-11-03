@@ -26,6 +26,7 @@ import java.util.stream.Stream;
  * @param duplicates      atendimentos repetidos de um mesmo {@code job_id} (fica o que terminou primeiro)
  * @param incomplete      jobs pai com fatias faltando, fora da análise
  * @param negativeWaits   fatias com {@code start < enqueue}: sinal de desvio de relógio entre gerador e pod
+ * @param allJobs         jobs completos, aquecimento incluído (a réplica ideal precisa do estado inicial)
  */
 record RunData(
         Set<String> runIds,
@@ -38,7 +39,9 @@ record RunData(
         int negativeWaits,
         long windowStartUs,
         long windowEndUs,
-        List<JobOutcome> jobs) {
+        List<JobOutcome> jobs,
+        List<JobOutcome> allJobs,
+        Delivery delivery) {
 
     /**
      * Job pai. {@code waitUs} soma as esperas de todas as fatias e {@code serviceUs} os
@@ -160,7 +163,8 @@ record RunData(
         }
         long end = kept.get(kept.size() - 1).enqueueUs();
         return new RunData(runIds, policies, workers, obs.size(), duplicates, incomplete,
-                all.size() - kept.size(), negativeWaits, cut, end, kept);
+                all.size() - kept.size(), negativeWaits, cut, end, kept, List.copyOf(all),
+                Delivery.of(first.values(), cut));
     }
 
     double windowSeconds() {

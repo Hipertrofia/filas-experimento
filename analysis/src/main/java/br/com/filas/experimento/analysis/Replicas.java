@@ -49,18 +49,20 @@ final class Replicas {
     static String render(List<RunReport> runs) {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format(Locale.ROOT, "== réplicas: %d rodadas (média ± meia-largura do IC 95%%, ms)%n", runs.size()));
-        sb.append(String.format(Locale.ROOT, "%-8s %-22s %-22s %-22s %-22s %10s %10s%n",
-                "classe", "E[Wq]", "E[Wq²]", "p99 Wq", "E[W]", "teoria Wq", "teoria W"));
+        sb.append(String.format(Locale.ROOT, "%-8s %-22s %-22s %-22s %-22s %-22s %10s %10s%n",
+                "classe", "E[Wq]", "E[Wq²]", "p99 Wq", "E[W]", "ideal Wq", "teoria Wq", "teoria W"));
         for (JobClass k : JobClass.values()) {
             List<RunReport> with = runs.stream().filter(r -> r.classes().containsKey(k)).toList();
             if (with.isEmpty()) {
                 continue;
             }
-            sb.append(String.format(Locale.ROOT, "%-8s %-22s %-22s %-22s %-22s %10s %10s%n", k,
+            boolean ideal = with.stream().allMatch(r -> r.ideal().containsKey(k));
+            sb.append(String.format(Locale.ROOT, "%-8s %-22s %-22s %-22s %-22s %-22s %10s %10s%n", k,
                     fmt(with, k, c -> c.wq().mean(), "%.2f"),
                     fmt(with, k, c -> c.wq().secondMoment(), "%.0f"),
                     fmt(with, k, c -> c.wq().p99(), "%.1f"),
                     fmt(with, k, c -> c.w().mean(), "%.2f"),
+                    ideal ? fmtIdeal(with, k) : "—",
                     theory(with, k, p -> p.wq()),
                     theory(with, k, p -> p.w())));
         }
@@ -72,6 +74,12 @@ final class Replicas {
         Estimate e = estimate(runs.stream().mapToDouble(r -> f.applyAsDouble(r.classes().get(k))).toArray());
         String m = String.format(Locale.ROOT, numFmt, e.mean());
         return Double.isNaN(e.halfWidth()) ? m : m + " ± " + String.format(Locale.ROOT, numFmt, e.halfWidth());
+    }
+
+    private static String fmtIdeal(List<RunReport> runs, JobClass k) {
+        Estimate e = estimate(runs.stream().mapToDouble(r -> r.ideal().get(k).wq().mean()).toArray());
+        String m = String.format(Locale.ROOT, "%.2f", e.mean());
+        return Double.isNaN(e.halfWidth()) ? m : m + " ± " + String.format(Locale.ROOT, "%.2f", e.halfWidth());
     }
 
     /** Média das previsões de cada rodada (cada uma usa os parâmetros medidos nela). */

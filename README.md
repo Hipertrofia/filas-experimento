@@ -11,7 +11,9 @@ especificação do worker em `docs/especificacao-worker.md`.
   testes de integração contra o broker de `infra/rabbitmq/` (pulados se ele não estiver no ar).
 - `worker-app`: configuração, montagem e ciclo de vida (SIGTERM).
 - `generator-app`: trace de Poisson por seed (`generate`) e envio em tempo real (`send`, SQS ou RabbitMQ).
-- `analysis`: leitura do JSONL, métricas por classe e comparação com a teoria.
+- `analysis`: leitura do JSONL, métricas por classe e comparação com a teoria,
+  com a réplica ideal da própria rodada (mesmas chegadas e serviços, sem overhead) e o overhead de
+  entrega por worker (fila ocupada: fim → início do próximo; servidor ocioso: chegada → início).
 - `experiments/`: configs de rodada e traces gerados.
 - `infra/elasticmq/`: SQS local para desenvolvimento (filas `prioritaria`, `normal`, `unica` e `dlq`).
 - `infra/rabbitmq/`: RabbitMQ local para desenvolvimento (as filas são declaradas pelos apps).
