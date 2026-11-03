@@ -1,4 +1,4 @@
-package br.com.filas.experimento.adapter.sqs;
+package br.com.filas.experimento.application;
 
 import br.com.filas.experimento.domain.Job;
 import br.com.filas.experimento.domain.JobClass;

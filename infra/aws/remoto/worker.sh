@@ -23,6 +23,12 @@ export WORKER_EXIT_AFTER_IDLE_MS="$ocioso_ms"
 export SQS_REGION="$REGION"
 # Heap fixo e pré-alocado: nada de crescimento de heap no meio da rodada.
 export JAVA_OPTS="-Xms512m -Xmx512m -XX:+AlwaysPreTouch"
+# Com RabbitMQ, URI e senha vêm do objeto que o broker grava no bucket ao subir.
+if grep -qi '^[[:space:]]*queue.backend[[:space:]]*=[[:space:]]*rabbitmq' "$cfg"; then
+    RABBITMQ_URI=$(aws s3 cp "s3://$BUCKET/broker/rabbitmq.env" - | sed -n 's/^RABBITMQ_URI=//p')
+    [[ -n "$RABBITMQ_URI" ]] || { echo "sem broker/rabbitmq.env no bucket" >&2; exit 1; }
+    export RABBITMQ_URI
+fi
 
 echo "worker $id: $cfg → $SINK_FILE"
 rc=0

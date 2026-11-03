@@ -21,6 +21,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Configuração do worker. Precedência: padrões &lt; arquivo .properties (1º argumento) &lt;
@@ -46,11 +48,13 @@ public record WorkerConfig(
         Optional<URI> sqsEndpoint,
         String sqsRegion,
         Duration idlePause,
-        Duration exitAfterIdle) {
+        Duration exitAfterIdle,
+        URI rabbitUri,
+        Set<QueueId> rabbitPriorityQueues) {
 
     public enum ServiceMode { SLEEP, CPU_BURN }
 
-    public enum Backend { LOCAL, SQS }
+    public enum Backend { LOCAL, SQS, RABBITMQ }
 
     static final String WAIT_PREFIX = "queue.wait-ms.";
 
@@ -58,13 +62,16 @@ public record WorkerConfig(
         queues = List.copyOf(queues);
         waitTimes = Map.copyOf(waitTimes);
         localQueueByClass = Map.copyOf(localQueueByClass);
+        rabbitPriorityQueues = Set.copyOf(rabbitPriorityQueues);
         if (threads < 1) {
             throw new IllegalArgumentException("worker.threads < 1: " + threads);
         }
         if (policy == ConsumptionPolicy.FIFO_COMPARTILHADO && queues.size() != 1) {
             throw new IllegalArgumentException("FIFO_COMPARTILHADO usa exatamente uma fila: " + queues);
         }
-        if (policy == ConsumptionPolicy.PRIORIDADE && queues.size() < 2) {
+        if (backend == Backend.RABBITMQ) {
+            checkRabbit(policy, queues, rabbitPriorityQueues);
+        } else if (policy == ConsumptionPolicy.PRIORIDADE && queues.size() < 2) {
             throw new IllegalArgumentException("PRIORIDADE precisa de prioritária e normal: " + queues);
         }
         for (QueueId q : waitTimes.keySet()) {
@@ -72,9 +79,29 @@ public record WorkerConfig(
                 throw new IllegalArgumentException(WAIT_PREFIX + q + " não está em worker.queues");
             }
         }
-        if (backend == Backend.SQS && (localTrace.isPresent() || exitWhenDrained)) {
+        if (backend != Backend.LOCAL && (localTrace.isPresent() || exitWhenDrained)) {
             throw new IllegalArgumentException("local.trace e local.exit-when-drained só valem com queue.backend=LOCAL; "
-                    + "no SQS as chegadas vêm do generator-app");
+                    + "no " + backend + " as chegadas vêm do generator-app");
+        }
+    }
+
+    /**
+     * No RabbitMQ cada worker consome uma fila só (push, prefetch = 1), e a prioridade vem da
+     * própria fila ({@code x-max-priority}), não da ordem de consulta.
+     */
+    private static void checkRabbit(ConsumptionPolicy policy, List<QueueId> queues, Set<QueueId> priorityQueues) {
+        if (queues.size() != 1) {
+            throw new IllegalArgumentException("com queue.backend=RABBITMQ o worker consome exatamente uma fila "
+                    + "(a prioridade vem de " + Keys.RABBIT_PRIORITY_QUEUES + "): " + queues);
+        }
+        boolean prio = priorityQueues.contains(queues.get(0));
+        if (policy == ConsumptionPolicy.PRIORIDADE && !prio) {
+            throw new IllegalArgumentException("PRIORIDADE no RabbitMQ: a fila " + queues.get(0)
+                    + " precisa estar em " + Keys.RABBIT_PRIORITY_QUEUES);
+        }
+        if (policy == ConsumptionPolicy.FIFO_COMPARTILHADO && prio) {
+            throw new IllegalArgumentException("FIFO_COMPARTILHADO no RabbitMQ: a fila " + queues.get(0)
+                    + " não pode estar em " + Keys.RABBIT_PRIORITY_QUEUES);
         }
     }
 
@@ -153,7 +180,14 @@ public record WorkerConfig(
                 Optional.ofNullable(m.get(Keys.SQS_ENDPOINT)).filter(s -> !s.isBlank()).map(URI::create),
                 m.getOrDefault(Keys.SQS_REGION, "us-east-1"),
                 millis(Keys.IDLE_PAUSE_MS, m.getOrDefault(Keys.IDLE_PAUSE_MS, "0")),
-                millis(Keys.EXIT_AFTER_IDLE_MS, m.getOrDefault(Keys.EXIT_AFTER_IDLE_MS, "0")));
+                millis(Keys.EXIT_AFTER_IDLE_MS, m.getOrDefault(Keys.EXIT_AFTER_IDLE_MS, "0")),
+                URI.create(m.getOrDefault(Keys.RABBIT_URI, "amqp://guest:guest@localhost:5672")),
+                queueSet(m.getOrDefault(Keys.RABBIT_PRIORITY_QUEUES, "")));
+    }
+
+    private static Set<QueueId> queueSet(String csv) {
+        return Arrays.stream(csv.split(",")).map(String::trim).filter(s -> !s.isEmpty())
+                .map(QueueId::new).collect(Collectors.toSet());
     }
 
     private static String require(Map<String, String> m, String key) {
@@ -211,11 +245,13 @@ public record WorkerConfig(
         static final String SQS_REGION = "sqs.region";
         static final String IDLE_PAUSE_MS = "worker.idle-pause-ms";
         static final String EXIT_AFTER_IDLE_MS = "worker.exit-after-idle-ms";
+        static final String RABBIT_URI = "rabbitmq.uri";
+        static final String RABBIT_PRIORITY_QUEUES = "rabbitmq.priority-queues";
 
         static final List<String> ALL = List.of(ID, THREADS, POLICY, QUEUES, SERVICE_MODE, BACKEND,
                 WAIT_MS, VISIBILITY_MS, SINK_FILE, SINK_FLUSH_MS, SHUTDOWN_MS, LOCAL_TRACE, LOCAL_SPIN_MS,
                 LOCAL_QUEUE_PRIORITY, LOCAL_QUEUE_NORMAL, LOCAL_EXIT_WHEN_DRAINED, SQS_ENDPOINT, SQS_REGION,
-                IDLE_PAUSE_MS, EXIT_AFTER_IDLE_MS);
+                IDLE_PAUSE_MS, EXIT_AFTER_IDLE_MS, RABBIT_URI, RABBIT_PRIORITY_QUEUES);
 
         private Keys() {
         }

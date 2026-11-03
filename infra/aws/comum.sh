@@ -80,6 +80,26 @@ ssm_saida() {
         --query '[StandardOutputContent,StandardErrorContent]' --output text
 }
 
+# Broker RabbitMQ ligado: o objeto broker/rabbitmq.env no bucket (gravado pelo broker quando ele
+# termina de subir) tem que ser da instância em execução, não de um broker anterior.
+broker_esperar() {
+    local bucket id gravado
+    bucket=$(saida_stack Bucket)
+    log "esperando o broker RabbitMQ subir"
+    for _ in $(seq 1 60); do
+        id=$(instancias broker)
+        if [[ -n "$id" ]]; then
+            gravado=$(aws s3 cp "s3://$bucket/broker/rabbitmq.env" - 2>/dev/null | sed -n 's/^BROKER_ID=//p' || true)
+            if [[ "$gravado" == "$id" ]]; then
+                log "broker pronto: $id"
+                return 0
+            fi
+        fi
+        sleep 10
+    done
+    die "o broker não ficou pronto em 10 min (veja /var/log/cloud-init-output.log na instância)"
+}
+
 # Valor de uma chave num .properties (sem expansão de variáveis).
 propriedade() {
     sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | tail -1 | tr -d '\r'

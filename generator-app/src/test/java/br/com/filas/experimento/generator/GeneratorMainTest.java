@@ -1,8 +1,8 @@
 package br.com.filas.experimento.generator;
 
 import br.com.filas.experimento.adapter.local.TraceCsv;
-import br.com.filas.experimento.adapter.sqs.JobMessageMapper;
 import br.com.filas.experimento.adapter.sqs.SqsJobQueue;
+import br.com.filas.experimento.application.JobMessageMapper;
 import br.com.filas.experimento.application.TraceReplayer;
 import br.com.filas.experimento.domain.Job;
 import br.com.filas.experimento.domain.JobClass;

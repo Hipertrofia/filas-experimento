@@ -1,4 +1,4 @@
-package br.com.filas.experimento.adapter.sqs;
+package br.com.filas.experimento.application;
 
 import br.com.filas.experimento.domain.Job;
 import br.com.filas.experimento.domain.JobClass;
@@ -10,7 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Corpo da mensagem SQS: objeto JSON plano com os campos da spec §2, tempos em microssegundos.
+ * Corpo da mensagem (SQS e RabbitMQ): objeto JSON plano com os campos da spec §2, tempos em microssegundos.
  *
  * <pre>
  * {"job_id":"…","run_id":"…","class":"NORMAL","size_us":187345,"enqueue_ts_us":1792497600123456,

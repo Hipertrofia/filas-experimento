@@ -1,5 +1,6 @@
 package br.com.filas.experimento.adapter.sqs;
 
+import br.com.filas.experimento.application.JobMessageMapper;
 import br.com.filas.experimento.application.port.out.JobQueue;
 import br.com.filas.experimento.domain.Job;
 import br.com.filas.experimento.domain.QueueId;

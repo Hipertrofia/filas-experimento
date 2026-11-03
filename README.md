@@ -1,17 +1,20 @@
 # filas-experimento
 
-Experimento de filas com workers em Java (SQS + EC2). Contexto e decisões em `CLAUDE.md`;
+Experimento de filas com workers em Java (SQS ou RabbitMQ + EC2). Contexto e decisões em `CLAUDE.md`;
 especificação do worker em `docs/especificacao-worker.md`.
 
 - Java 17, Gradle (Kotlin DSL) com wrapper, pacote base `br.com.filas.experimento`.
 - `core`: domínio, portas e `WorkerLoop`, só JDK (garantido por teste ArchUnit).
 - `adapter-local`: fila em memória, executores `SLEEP`/`CPU_BURN`, relógio do sistema, sink JSONL.
 - `adapter-sqs`: fila SQS (AWS SDK v2); testado contra ElasticMQ embutido.
+- `adapter-rabbitmq`: fila RabbitMQ por push (`basic.consume`, prefetch = 1, `x-max-priority`);
+  testes de integração contra o broker de `infra/rabbitmq/` (pulados se ele não estiver no ar).
 - `worker-app`: configuração, montagem e ciclo de vida (SIGTERM).
-- `generator-app`: trace de Poisson por seed (`generate`) e envio em tempo real (`send`, fase SQS).
+- `generator-app`: trace de Poisson por seed (`generate`) e envio em tempo real (`send`, SQS ou RabbitMQ).
 - `analysis`: leitura do JSONL, métricas por classe e comparação com a teoria.
 - `experiments/`: configs de rodada e traces gerados.
 - `infra/elasticmq/`: SQS local para desenvolvimento (filas `prioritaria`, `normal`, `unica` e `dlq`).
+- `infra/rabbitmq/`: RabbitMQ local para desenvolvimento (as filas são declaradas pelos apps).
 - `infra/aws/`: filas SQS, pods EC2, checagem de relógio e coleta dos registros (ver `infra/aws/README.md`).
 
 ## Comandos
@@ -45,6 +48,27 @@ Sem Docker, o jar standalone do ElasticMQ usa a mesma configuração:
 Na AWS real, omita `sqs.endpoint`: as credenciais vêm da cadeia padrão (perfil, variáveis ou
 papel da instância). No SQS, a espera do receive (`queue.wait-ms*`) é em segundos inteiros, de 0 a
 20, e o `send` do gerador avisa quando o atraso de envio passa de 5 ms.
+
+## Com RabbitMQ (Docker local)
+
+```
+docker compose -f infra/rabbitmq/docker-compose.yml up -d
+./gradlew :worker-app:installDist :generator-app:installDist
+generator-app/build/install/generator-app/bin/generator-app generate experiments/rabbitmq-dev-fumaca.properties
+worker-app/build/install/worker-app/bin/worker-app experiments/rabbitmq-dev-worker.properties
+generator-app/build/install/generator-app/bin/generator-app send experiments/rabbitmq-dev-fumaca.properties
+```
+
+O broker empurra a próxima mensagem assim que o worker confirma a anterior (prefetch = 1), então
+não há polling. A disciplina fica na declaração da fila: as listadas em `rabbitmq.priority-queues`
+recebem `x-max-priority = 1` e entregam os jobs `PRIORITY` primeiro (prioridade não-preemptiva);
+as demais são FIFO. Para `PRIORIDADE`, as duas classes vão para a mesma fila (`queue.priority` =
+`queue.normal`) e o worker consome só ela. Cada worker consome exatamente uma fila; `RESERVADO` e
+`FAST_LANE_FISICA` usam filas diferentes em pods diferentes. Gerador e workers declaram as filas
+com os mesmos argumentos; se uma fila já existir com outros, a partida falha.
+
+`rabbitmq.uri` sem barra final usa o vhost `/` (`amqp://usuario:senha@host:5672`); a senha pode vir
+de `RABBITMQ_URI`. O `receive_count` vale 1 ou 2 (o RabbitMQ só informa se é reentrega).
 
 ## Trace
 

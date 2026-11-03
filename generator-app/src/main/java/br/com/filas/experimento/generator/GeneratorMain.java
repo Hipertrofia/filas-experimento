@@ -3,10 +3,14 @@ package br.com.filas.experimento.generator;
 import br.com.filas.experimento.adapter.local.PreciseSleeper;
 import br.com.filas.experimento.adapter.local.SystemClockAdapter;
 import br.com.filas.experimento.adapter.local.TraceCsv;
+import br.com.filas.experimento.adapter.rabbitmq.RabbitBroker;
+import br.com.filas.experimento.adapter.rabbitmq.RabbitJobQueue;
 import br.com.filas.experimento.adapter.sqs.SqsJobQueue;
 import br.com.filas.experimento.application.PoissonTraceGenerator;
 import br.com.filas.experimento.application.TraceReplayer;
+import br.com.filas.experimento.application.port.out.JobQueue;
 import br.com.filas.experimento.domain.JobClass;
+import br.com.filas.experimento.domain.QueueId;
 import br.com.filas.experimento.domain.Trace;
 import br.com.filas.experimento.domain.TraceEntry;
 
@@ -94,28 +98,43 @@ public final class GeneratorMain {
                 }
             }
         }
+        List<QueueId> queues = List.copyOf(new LinkedHashSet<>(cfg.queueByClass().values()));
+        if (cfg.backend() == GeneratorConfig.Backend.RABBITMQ) {
+            try (RabbitBroker broker = RabbitBroker.connect(cfg.rabbitUri(), cfg.rabbitPriorityQueues(), "generator")) {
+                broker.declare(queues);
+                // close() espera os publisher confirms: um envio perdido derruba a rodada.
+                try (RabbitJobQueue rabbit = broker.publisher()) {
+                    return replay(cfg, trace, rabbit);
+                }
+            }
+        }
         // O gerador só envia: a espera e o visibility timeout do receive não se aplicam.
         SqsJobQueue.Settings settings = new SqsJobQueue.Settings(Map.of(), Duration.ZERO, Duration.ofSeconds(30));
         try (SqsJobQueue sqs = new SqsJobQueue(SqsJobQueue.client(cfg.sqsEndpoint(), cfg.sqsRegion()), settings)) {
-            sqs.resolve(List.copyOf(new LinkedHashSet<>(cfg.queueByClass().values())));
-            TraceReplayer replayer = new TraceReplayer(
-                    sqs, new SystemClockAdapter(), PreciseSleeper.forPlatform(), cfg.queueByClass());
-            log("enviando " + trace.entries().size() + " chegadas de " + trace.runId() + " para " + cfg.queueByClass());
-            TraceReplayer.ReplayStats s;
-            try {
-                s = replayer.replay(trace);
-            } catch (InterruptedException e) {
-                log("envio interrompido");
-                throw e;
-            }
-            log(String.format(Locale.ROOT, "%d/%d enviadas; atraso médio %.3f ms, máximo %.3f ms",
-                    s.sent(), s.total(), s.meanLag().toNanos() / 1e6, s.maxLag().toNanos() / 1e6));
-            if (s.maxLag().compareTo(LAG_WARNING) > 0) {
-                log("ATENÇÃO: atraso máximo acima de " + LAG_WARNING.toMillis()
-                        + " ms; as chegadas podem ter deixado de ser Poisson");
-            }
-            return s;
+            sqs.resolve(queues);
+            return replay(cfg, trace, sqs);
         }
+    }
+
+    private static TraceReplayer.ReplayStats replay(GeneratorConfig cfg, Trace trace, JobQueue queue)
+            throws InterruptedException {
+        TraceReplayer replayer = new TraceReplayer(
+                queue, new SystemClockAdapter(), PreciseSleeper.forPlatform(), cfg.queueByClass());
+        log("enviando " + trace.entries().size() + " chegadas de " + trace.runId() + " para " + cfg.queueByClass());
+        TraceReplayer.ReplayStats s;
+        try {
+            s = replayer.replay(trace);
+        } catch (InterruptedException e) {
+            log("envio interrompido");
+            throw e;
+        }
+        log(String.format(Locale.ROOT, "%d/%d enviadas; atraso médio %.3f ms, máximo %.3f ms",
+                s.sent(), s.total(), s.meanLag().toNanos() / 1e6, s.maxLag().toNanos() / 1e6));
+        if (s.maxLag().compareTo(LAG_WARNING) > 0) {
+            log("ATENÇÃO: atraso máximo acima de " + LAG_WARNING.toMillis()
+                    + " ms; as chegadas podem ter deixado de ser Poisson");
+        }
+        return s;
     }
 
     private static void log(String msg) {

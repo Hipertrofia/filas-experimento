@@ -4,6 +4,7 @@
 # Uso: infra/aws/rodada.sh <worker.properties> <gerador.properties> [--rotulo NOME] [--purge]
 #   ex.: infra/aws/rodada.sh experiments/aws-worker-prioridade.properties experiments/aws-fumaca.properties
 #
+# Com queue.backend=RABBITMQ nas duas configs, a rodada usa o broker da stack (capacidade.sh … 1).
 # Passos: gera o trace localmente se faltar → confere relógios → confere filas vazias → sobe os
 # workers → envia o trace → espera os workers ficarem ociosos e saírem → baixa os registros.
 source "$(dirname "$0")/comum.sh"
@@ -28,7 +29,11 @@ grep -q '^[[:space:]]*sqs.endpoint' "$wcfg" "$gcfg" && die "remova sqs.endpoint 
 
 run_id=$(propriedade "$gcfg" run.id)
 politica=$(propriedade "$wcfg" worker.policy)
-rotulo=${rotulo:-$run_id-$(echo "$politica" | tr 'A-Z_' 'a-z-')-$(date -u +%Y%m%dT%H%M%SZ)}
+backend=$(propriedade "$wcfg" queue.backend | tr 'a-z' 'A-Z')
+[[ "$(propriedade "$gcfg" queue.backend | tr 'a-z' 'A-Z')" == "$backend" ]]     || die "worker e gerador com queue.backend diferentes"
+sufixo=""
+[[ "$backend" == RABBITMQ ]] && sufixo="-rabbitmq"
+rotulo=${rotulo:-$run_id-$(echo "$politica" | tr 'A-Z_' 'a-z-')$sufixo-$(date -u +%Y%m%dT%H%M%SZ)}
 destino="registros/aws/$rotulo"
 [[ ! -e "$destino" ]] || die "$destino já existe"
 # Ociosidade antes de o worker sair: maior que qualquer intervalo entre chegadas plausível.
@@ -39,7 +44,12 @@ workers=$(instancias worker)
 gerador=$(instancias gerador)
 [[ -n "$workers" ]] || die "nenhum worker ligado (infra/aws/capacidade.sh)"
 [[ -n "$gerador" ]] || die "gerador desligado (infra/aws/capacidade.sh)"
-log "rodada $rotulo: $(echo $workers | wc -w) workers, política $politica"
+if [[ "$backend" == RABBITMQ ]]; then
+    broker=$(instancias broker)
+    [[ -n "$broker" ]] || die "broker desligado (infra/aws/capacidade.sh <workers> 1 1)"
+    broker_esperar
+fi
+log "rodada $rotulo: $(echo $workers | wc -w) workers, política $politica, $backend"
 
 trace=$(propriedade "$gcfg" trace.file)
 trace=${trace:-experiments/traces/$run_id.csv}
@@ -52,19 +62,31 @@ mkdir -p "$destino"
 infra/aws/relogio.sh "$destino/relogio.txt"
 
 filas=$(echo $(propriedade "$wcfg" worker.queues | tr ',' ' '))
-for f in $filas; do
-    url=$(aws sqs get-queue-url --queue-name "$f" --query QueueUrl --output text)
+if [[ "$backend" == RABBITMQ ]]; then
+    # O purge do RabbitMQ é imediato. Fila ainda não declarada (primeira rodada) conta como vazia.
+    for f in $filas; do
+        if [[ $purge -eq 1 ]]; then
+            cmd=$(ssm_enviar "$broker" 60 "docker exec rabbitmq rabbitmqctl -q purge_queue $f || true")
+            ssm_esperar "$cmd" "$broker" || die "purge de $f falhou"
+        fi
+        cmd=$(ssm_enviar "$broker" 60 "docker exec rabbitmq rabbitmqctl -q list_queues name messages")
+        ssm_esperar "$cmd" "$broker" || die "não consegui listar as filas do broker"
+        n=$(ssm_saida "$cmd" "$broker" | awk -v f="$f" '$1 == f { print $2 }')
+        [[ -z "$n" || "$n" == 0 ]] || die "fila $f com $n mensagens; use --purge"
+    done
+else
+    for f in $filas; do
+        url=$(aws sqs get-queue-url --queue-name "$f" --query QueueUrl --output text)
+        if [[ $purge -eq 1 ]]; then
+            aws sqs purge-queue --queue-url "$url"
+        fi
+        n=$(aws sqs get-queue-attributes --queue-url "$url"             --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible             --query 'sum(map(&to_number(@), values(Attributes)))' --output text)
+        [[ $purge -eq 1 || "$n" == 0 ]] || die "fila $f com ~$n mensagens; use --purge"
+    done
     if [[ $purge -eq 1 ]]; then
-        aws sqs purge-queue --queue-url "$url"
+        log "purge pedido; o SQS leva até 60 s para concluir"
+        sleep 60
     fi
-    n=$(aws sqs get-queue-attributes --queue-url "$url" \
-        --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
-        --query 'sum(map(&to_number(@), values(Attributes)))' --output text)
-    [[ $purge -eq 1 || "$n" == 0 ]] || die "fila $f com ~$n mensagens; use --purge"
-done
-if [[ $purge -eq 1 ]]; then
-    log "purge pedido; o SQS leva até 60 s para concluir"
-    sleep 60
 fi
 
 aws s3 sync experiments "s3://$bucket/experiments" --delete --quiet

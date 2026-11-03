@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Liga ou desliga as instâncias. Uso: infra/aws/capacidade.sh <workers> <gerador 0|1>
-#   infra/aws/capacidade.sh 2 1   dois pods e o gerador
-#   infra/aws/capacidade.sh 0 0   desliga tudo (filas e bucket continuam, sem custo de EC2)
+# Liga ou desliga as instâncias. Uso: infra/aws/capacidade.sh <workers> <gerador 0|1> [broker 0|1]
+#   infra/aws/capacidade.sh 2 1     dois pods e o gerador (sem broker: só SQS)
+#   infra/aws/capacidade.sh 1 1 1   um pod, o gerador e o broker RabbitMQ
+#   infra/aws/capacidade.sh 0 0     desliga tudo (filas e bucket continuam, sem custo de EC2)
+# O broker omitido vale 0: ele é desligado se estava ligado.
 # Desligar termina as instâncias: os registros já coletados ficam no S3 e em registros/aws/.
 source "$(dirname "$0")/comum.sh"
 
-[[ $# -eq 2 ]] || die "uso: $0 <workers> <gerador 0|1>"
+[[ $# -eq 2 || $# -eq 3 ]] || die "uso: $0 <workers> <gerador 0|1> [broker 0|1]"
 workers=$1
 gerador=$2
+broker=${3:-0}
 
 aws cloudformation deploy \
     --stack-name "$STACK" \
     --template-file infra/aws/filas.yaml \
     --capabilities CAPABILITY_IAM \
     --no-fail-on-empty-changeset \
-    --parameter-overrides "WorkerCount=$workers" "GeneratorCount=$gerador"
+    --parameter-overrides "WorkerCount=$workers" "GeneratorCount=$gerador" "BrokerCount=$broker"
+
+if [[ $broker -eq 1 ]]; then
+    broker_esperar
+fi
 
 esperado=$((workers + gerador))
 [[ $esperado -gt 0 ]] || { log "tudo desligado"; exit 0; }

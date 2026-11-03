@@ -7,6 +7,8 @@ import br.com.filas.experimento.adapter.local.PreciseSleeper;
 import br.com.filas.experimento.adapter.local.SleepServiceExecutor;
 import br.com.filas.experimento.adapter.local.SystemClockAdapter;
 import br.com.filas.experimento.adapter.local.TraceCsv;
+import br.com.filas.experimento.adapter.rabbitmq.RabbitBroker;
+import br.com.filas.experimento.adapter.rabbitmq.RabbitJobQueue;
 import br.com.filas.experimento.adapter.sqs.SqsJobQueue;
 import br.com.filas.experimento.application.TraceReplayer;
 import br.com.filas.experimento.application.WorkerLoop;
@@ -25,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /** Único ponto que conhece os adaptadores: monta o {@link WorkerRuntime} a partir da configuração. */
 public final class Wiring {
@@ -50,7 +53,10 @@ public final class Wiring {
                         "[sqs] %s: %d receives, %d vazios%n", q, s.receives(), s.empty()));
                 sqs.close();
             };
-            return assemble(cfg, sqs, clock, List.of(), null, closeAndReport);
+            return assemble(cfg, id -> sqs, clock, List.of(), null, closeAndReport);
+        }
+        if (cfg.backend() == WorkerConfig.Backend.RABBITMQ) {
+            return rabbit(cfg, clock);
         }
         InMemoryJobQueue queue = new InMemoryJobQueue(cfg.waitTimes(), cfg.defaultWait(), cfg.visibilityTimeout());
 
@@ -78,11 +84,38 @@ public final class Wiring {
                     && queue.inFlightCount() == 0
                     && all.stream().allMatch(q -> queue.readyCount(q) == 0);
         }
-        return assemble(cfg, queue, clock, feeders, drained, () -> { });
+        return assemble(cfg, id -> queue, clock, feeders, drained, () -> { });
     }
 
-    private static WorkerRuntime assemble(WorkerConfig cfg, JobQueue queue, Clock clock, List<RunWorker> feeders,
-                                          BooleanSupplier drained, AutoCloseable queueResource) throws IOException {
+    /** Uma conexão por processo e um canal por worker: o prefetch = 1 vale por thread. */
+    private static WorkerRuntime rabbit(WorkerConfig cfg, Clock clock) throws IOException {
+        RabbitBroker broker = RabbitBroker.connect(cfg.rabbitUri(), cfg.rabbitPriorityQueues(), cfg.workerId());
+        List<RabbitJobQueue> channels = new ArrayList<>();
+        try {
+            broker.declare(cfg.queues());
+            QueueId queue = cfg.queues().get(0);
+            AutoCloseable closeAll = () -> {
+                try {
+                    channels.forEach(RabbitJobQueue::close);
+                } finally {
+                    broker.close();
+                }
+            };
+            return assemble(cfg, id -> {
+                RabbitJobQueue q = broker.consumer(queue, cfg.defaultWait());
+                channels.add(q);
+                return q;
+            }, clock, List.of(), null, closeAll);
+        } catch (RuntimeException | IOException e) {
+            broker.close();
+            throw e;
+        }
+    }
+
+    /** @param queueFor fila de cada worker, pelo id da thread */
+    private static WorkerRuntime assemble(WorkerConfig cfg, Function<String, JobQueue> queueFor, Clock clock,
+                                          List<RunWorker> feeders, BooleanSupplier drained,
+                                          AutoCloseable queueResource) throws IOException {
         BufferedJsonLinesSink jsonl = new BufferedJsonLinesSink(cfg.sinkFile(), cfg.flushInterval());
         // Instante do último registro (monotônico), para a parada por ociosidade. A contagem só
         // começa no primeiro registro: antes disso o worker pode estar esperando a rodada começar.
@@ -101,7 +134,7 @@ public final class Wiring {
         List<RunWorker> workers = new ArrayList<>();
         for (String id : cfg.threadIds()) {
             workers.add(new WorkerLoop(new WorkerSettings(id, cfg.policy(), cfg.queues()),
-                    queue, executor(cfg.serviceMode()), clock, sink, PreciseSleeper.forPlatform(), cfg.idlePause()));
+                    queueFor.apply(id), executor(cfg.serviceMode()), clock, sink, PreciseSleeper.forPlatform(), cfg.idlePause()));
         }
         AutoCloseable resources = () -> {
             try {

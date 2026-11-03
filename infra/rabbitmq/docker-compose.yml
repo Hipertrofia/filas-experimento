@@ -1,0 +1,8 @@
+# RabbitMQ local para desenvolvimento:  docker compose -f infra/rabbitmq/docker-compose.yml up -d
+# AMQP: amqp://guest:guest@localhost:5672 (sem barra final: vhost /)   Painel: http://localhost:15672 (guest/guest)
+services:
+  rabbitmq:
+    image: rabbitmq:4.1.4-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"

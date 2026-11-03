@@ -6,10 +6,15 @@ Uma stack do CloudFormation (`filas.yaml`) com:
 - **Pods worker**: um grupo de Auto Scaling de tamanho fixo (`WorkerCount`). Cada instância roda
   um worker com uma thread, ou seja, um servidor.
 - **Gerador**: outro grupo, com 0 ou 1 instância.
+- **Broker RabbitMQ**: outro grupo, com 0 ou 1 instância (`BrokerCount`). RabbitMQ em Docker
+  (imagem oficial pelo ECR Public) com a rede do host. A porta AMQP (5672) aceita só as instâncias
+  da própria stack. A senha é sorteada no boot; quando o broker termina de subir, grava URI e
+  senha em `s3://<bucket>/broker/rabbitmq.env`, de onde worker e gerador leem.
 - **Bucket S3** para o pacote da aplicação, a cópia de `experiments/` e os registros.
 - **Papel IAM** com acesso só a essas filas e a esse bucket, mais o SSM.
 
-As instâncias usam Amazon Linux 2023, ficam todas na mesma zona e não têm porta de entrada nem chave SSH.
+As instâncias usam Amazon Linux 2023, ficam todas na mesma zona e não têm chave SSH; a única porta
+de entrada é a AMQP do broker, fechada para fora da stack.
 Os scripts as comandam pelo **SSM Run Command**. O relógio vem do Amazon Time Sync Service
 (chrony, já configurado na AMI).
 
@@ -37,7 +42,11 @@ infra/aws/relogio.sh                     # confere os relógios (a rodada també
 infra/aws/rodada.sh experiments/aws-worker-prioridade.properties experiments/aws-fumaca.properties
 analysis/build/install/analysis/bin/analysis --warmup-s 10 registros/aws/<rótulo>
 
-infra/aws/capacidade.sh 0 0              # desliga as instâncias ao terminar o dia
+# RabbitMQ: o terceiro argumento liga o broker; mesmo trace da fumaça SQS c = 1
+infra/aws/capacidade.sh 1 1 1
+infra/aws/rodada.sh experiments/aws-worker-rabbitmq-prioridade.properties experiments/aws-fumaca-c1-rabbitmq.properties
+
+infra/aws/capacidade.sh 0 0              # desliga as instâncias ao terminar o dia (broker incluído)
 infra/aws/destruir.sh                    # apaga tudo, inclusive o bucket
 ```
 

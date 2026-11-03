@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Experimento de filas: filas SQS (as mesmas do ElasticMQ de desenvolvimento), pods worker e
-  gerador em EC2 (um grupo de Auto Scaling fixo para cada papel) e bucket S3 para o pacote da
-  aplicação e os registros. Sem portas de entrada: as instâncias são comandadas pelo SSM.
+  Experimento de filas: filas SQS (as mesmas do ElasticMQ de desenvolvimento), broker RabbitMQ,
+  pods worker e gerador em EC2 (um grupo de Auto Scaling fixo para cada papel) e bucket S3 para o
+  pacote da aplicação e os registros. A única porta de entrada é a AMQP do broker, aberta só para
+  as instâncias da própria stack; o resto é comandado pelo SSM.
 
 Parameters:
   InstanceType:
@@ -20,6 +21,15 @@ Parameters:
     Default: 0
     AllowedValues: [0, 1]
     Description: Instância do gerador. 0 = desligado.
+  BrokerCount:
+    Type: Number
+    Default: 0
+    AllowedValues: [0, 1]
+    Description: Instância do broker RabbitMQ. 0 = desligado (rodadas só com SQS).
+  RabbitImage:
+    Type: String
+    Default: public.ecr.aws/docker/library/rabbitmq:4.1.4-management
+    Description: Imagem do broker (espelho no ECR Public da imagem oficial, sem limite de pull do Docker Hub).
   ImageId:
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
@@ -106,11 +116,19 @@ Resources:
     Properties:
       Roles: [!Ref Role]
 
-  # Na VPC padrão; só saída (SQS, S3, SSM e repositório de pacotes).
+  # Na VPC padrão. Saída livre (SQS, S3, SSM, pacotes); entrada só AMQP entre as instâncias da stack.
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: filas-experimento, sem entrada
+      GroupDescription: filas-experimento, entrada so AMQP dentro da stack
+  AmqpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 5672
+      ToPort: 5672
 
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -137,7 +155,40 @@ Resources:
               chmod +x /opt/filas/app/*/bin/* /opt/filas/app/remoto/*.sh
             fi
 
-  # Todos na mesma zona: a latência até o SQS fica igual para os pods.
+  # Broker: RabbitMQ em Docker com a rede do host (sem NAT no caminho). Senha aleatória por
+  # instância; quando o broker termina de subir, URI e senha vão para s3://<bucket>/broker/, de
+  # onde os pods leem (a senha não passa pela linha de comando do SSM).
+  BrokerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y docker
+            systemctl enable --now docker
+            senha=$(head -c 32 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 24)
+            docker run -d --name rabbitmq --restart always --network host \
+              -e RABBITMQ_DEFAULT_USER=filas -e RABBITMQ_DEFAULT_PASS=$senha '${RabbitImage}'
+            for i in $(seq 1 120); do
+              docker logs rabbitmq 2>&1 | grep -q 'Server startup complete' && break
+              sleep 2
+            done
+            docker logs rabbitmq 2>&1 | grep -q 'Server startup complete'
+            token=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+            ip=$(curl -s -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/local-ipv4)
+            id=$(curl -s -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
+            umask 077
+            printf 'BROKER_ID=%s\nRABBITMQ_URI=amqp://filas:%s@%s:5672\n' $id $senha $ip > /root/rabbitmq.env
+            aws s3 cp /root/rabbitmq.env s3://${Bucket}/broker/rabbitmq.env --region ${AWS::Region}
+
+  # Todos na mesma zona: a latência até o SQS e até o broker fica igual para os pods.
   Workers:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -166,6 +217,20 @@ Resources:
         - { Key: Name, Value: !Sub '${AWS::StackName}-gerador', PropagateAtLaunch: true }
         - { Key: filas-stack, Value: !Ref AWS::StackName, PropagateAtLaunch: true }
         - { Key: filas-papel, Value: gerador, PropagateAtLaunch: true }
+  Broker:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: [!Select [0, !GetAZs '']]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BrokerLaunchTemplate
+        Version: !GetAtt BrokerLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref BrokerCount
+      MaxSize: !Ref BrokerCount
+      DesiredCapacity: !Ref BrokerCount
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-broker', PropagateAtLaunch: true }
+        - { Key: filas-stack, Value: !Ref AWS::StackName, PropagateAtLaunch: true }
+        - { Key: filas-papel, Value: broker, PropagateAtLaunch: true }
 
 Outputs:
   Bucket:

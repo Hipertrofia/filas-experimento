@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -75,6 +76,34 @@ class WorkerConfigTest {
         semPolicy.remove("worker.policy");
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(semPolicy));
         assertTrue(e.getMessage().contains("WORKER_POLICY"), e.getMessage());
+    }
+
+    @Test
+    void rabbitConsomeUmaFilaEAPrioridadeVemDaDeclaracao() {
+        Map<String, String> m = base();
+        m.put("queue.backend", "rabbitmq");
+        m.put("worker.queues", "jobs");
+        m.put("rabbitmq.priority-queues", "jobs, outra");
+        WorkerConfig c = WorkerConfig.from(m);
+        assertEquals(WorkerConfig.Backend.RABBITMQ, c.backend());
+        assertEquals(Set.of(new QueueId("jobs"), new QueueId("outra")), c.rabbitPriorityQueues());
+        assertEquals("localhost", c.rabbitUri().getHost());
+
+        Map<String, String> duas = new HashMap<>(m);
+        duas.put("worker.queues", "jobs,outra");
+        assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(duas));
+
+        Map<String, String> prioSemDeclarar = new HashMap<>(m);
+        prioSemDeclarar.remove("rabbitmq.priority-queues");
+        assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(prioSemDeclarar));
+
+        Map<String, String> fifoComPrioridade = new HashMap<>(m);
+        fifoComPrioridade.put("worker.policy", "FIFO_COMPARTILHADO");
+        assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(fifoComPrioridade));
+
+        Map<String, String> comTrace = new HashMap<>(m);
+        comTrace.put("local.trace", "x.csv");
+        assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(comTrace));
     }
 
     @Test

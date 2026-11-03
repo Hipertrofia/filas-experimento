@@ -1,3 +1,3 @@
 rootProject.name = "filas-experimento"
 
-include("core", "adapter-local", "adapter-sqs", "worker-app", "generator-app", "analysis")
+include("core", "adapter-local", "adapter-sqs", "adapter-rabbitmq", "worker-app", "generator-app", "analysis")

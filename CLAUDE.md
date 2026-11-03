@@ -29,11 +29,12 @@ O trabalho se apoia no documento "Filas, distribuições phase-type e orquestra�
 core/            domínio + aplicação, Java puro, sem dependências
 adapter-local/   fila em memória, executores (sleep, cpu burn), relógio, sink JSONL
 adapter-sqs/     único módulo que conhece o AWS SDK
+adapter-rabbitmq/ único módulo que conhece o cliente AMQP
 worker-app/      ponto de entrada, configuração, montagem dos adaptadores
 generator-app/   fase seguinte: trace Poisson e envio
 experiments/     configs de rodada (política, ρ, seed) e traces
 analysis/        leitura do JSONL, métricas por classe e teoria (P-K, Cobham)
-infra/           elasticmq/ (desenvolvimento) e aws/ (CloudFormation + scripts SSM)
+infra/           elasticmq/ e rabbitmq/ (desenvolvimento), aws/ (CloudFormation + scripts SSM)
 ```
 
 Regras de dependência: `core` não depende de nada fora do JDK; `adapter-*` dependem só do `core`; só o `worker-app` conhece os adaptadores. Vale ter um teste ArchUnit no `core` que falhe se alguma classe importar algo fora do JDK.
@@ -52,7 +53,9 @@ Detalhes completos em `docs/especificacao-worker.md`.
 
 - Estratégia de polling para a fila prioritária sem vazamento de prioridade. No ElasticMQ (2026-10-20), polling curto nas duas filas com pausa de 5 ms ficou perto da referência em memória; long polling na normal vaza prioridade e long polling na prioritária deixa a normal instável.
 - Na AWS (2026-10-29, fumaça c = 1, ρ = 0,54, prioridade, `registros/aws/aws-fumaca-c1-s1-prioridade-20261029T204216Z`) o polling curto não serve: E[Wq] ficou 6–7× acima de Cobham. Fim de job → receive do próximo: ~11 ms se o próximo é prioritário, ≥ 60 ms se é normal (um receive vazio na prioritária custa ~50 ms); com o servidor ocioso, ~79 ms de mediana até o receive. O serviço efetivo sobe de ~105 para ~155 ms e o ρ real fica perto de 0,8. Relógio, coleta e serviço (`SLEEP`, +0,6 ms) funcionaram.
-- Próximo passo (decidido em 2026-10-29): `adapter-rabbitmq` com `basic.consume`, prefetch = 1 e fila com `x-max-priority` (push, sem polling, prioridade nativa), testado contra RabbitMQ no Docker; depois o broker na stack da AWS e rodada c = 1 lado a lado com o SQS. Manter os dois: RabbitMQ como caso próximo do ideal, SQS como caso de nuvem em que o overhead de polling é resultado. `RESERVADO` vai precisar de duas filas.
+- `adapter-rabbitmq` feito (2026-11-03): `basic.consume`, prefetch = 1, uma fila com `x-max-priority = 1` para `PRIORIDADE` (push, sem polling, prioridade do broker). Cada worker consome uma fila só; `RESERVADO` usa filas diferentes em pods diferentes. O formato da mensagem (`JobMessageMapper`) foi para o `core`, compartilhado com o SQS. Fumaça local (RabbitMQ 4.1 no Docker Desktop, c = 1, ρ = 0,54, `CPU_BURN`, uma réplica de 120 s): prioritária E[Wq] = 1,04× Cobham; normal 0,79× (só 298 jobs, falta repetir com mais seeds); fim de job → início do próximo ~2 ms nas duas classes; servidor ocioso, chegada → início ~2,7 ms de mediana.
+- Broker RabbitMQ na stack (2026-11-03): grupo `Broker` (`capacidade.sh <w> <g> 1`), RabbitMQ em Docker com rede do host, AMQP aberta só dentro do security group, URI e senha em `s3://<bucket>/broker/rabbitmq.env`. Fumaça c = 1 na AWS com o mesmo trace do SQS (`registros/aws/aws-fumaca-c1-s1-prioridade-rabbitmq-20261103T171418Z`, aquecimento 10 s): prioritária E[Wq] 94,8 ms = 1,05× Cobham (SQS: 632 ms, 7,0×); normal 147 ms = 0,76× (SQS: 1159 ms, 6,0×). O 0,76× é do trace: a simulação ideal sem overhead no mesmo trace dá 140 ms. Fim de job → início do próximo ~1,1 ms nas duas classes (SQS: 10,9 / 63,8 ms); servidor ocioso, chegada → início 1,5 ms de mediana, p99 1,9 ms (SQS: 74 / 445 ms).
+- Próximo passo: réplicas com seeds diferentes e c > 1, nas duas filas. Manter os dois: RabbitMQ como caso próximo do ideal, SQS como caso de nuvem em que o overhead de polling é resultado. As medidas de intervalo de entrega ainda são feitas por script avulso; levar para o `analysis`.
 - Cota de EC2 da conta: 5 vCPUs sob demanda (cabem 2 `c7i.large`); pedido de 32 vCPUs aberto como chamado de suporte em 2026-10-29.
 - Modo de atendimento: `SLEEP` primeiro, `CPU_BURN` depois.
 

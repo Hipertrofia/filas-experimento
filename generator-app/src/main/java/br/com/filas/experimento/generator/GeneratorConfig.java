@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +20,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Configuração de uma rodada do gerador. A carga vem de uma de duas formas:
@@ -38,12 +41,15 @@ public record GeneratorConfig(
         Map<JobClass, QueueId> queueByClass,
         Optional<Duration> visibilityTimeout,
         Optional<URI> sqsEndpoint,
-        String sqsRegion) {
+        String sqsRegion,
+        URI rabbitUri,
+        Set<QueueId> rabbitPriorityQueues) {
 
-    public enum Backend { LOCAL, SQS }
+    public enum Backend { LOCAL, SQS, RABBITMQ }
 
     public GeneratorConfig {
         queueByClass = Map.copyOf(queueByClass);
+        rabbitPriorityQueues = Set.copyOf(rabbitPriorityQueues);
     }
 
     public static GeneratorConfig load(Path file, Map<String, String> env, Properties sysProps) throws IOException {
@@ -108,7 +114,10 @@ public record GeneratorConfig(
                 queues,
                 Optional.ofNullable(m.get(Keys.VISIBILITY_MS)).map(v -> Duration.ofMillis(Long.parseLong(v.trim()))),
                 Optional.ofNullable(m.get(Keys.SQS_ENDPOINT)).filter(v -> !v.isBlank()).map(URI::create),
-                m.getOrDefault(Keys.SQS_REGION, "us-east-1"));
+                m.getOrDefault(Keys.SQS_REGION, "us-east-1"),
+                URI.create(m.getOrDefault(Keys.RABBIT_URI, "amqp://guest:guest@localhost:5672")),
+                Arrays.stream(m.getOrDefault(Keys.RABBIT_PRIORITY_QUEUES, "").split(",")).map(String::trim)
+                        .filter(s -> !s.isEmpty()).map(QueueId::new).collect(Collectors.toSet()));
     }
 
     private static String require(Map<String, String> m, String key) {
@@ -143,10 +152,13 @@ public record GeneratorConfig(
         static final String VISIBILITY_MS = "queue.visibility-timeout-ms";
         static final String SQS_ENDPOINT = "sqs.endpoint";
         static final String SQS_REGION = "sqs.region";
+        static final String RABBIT_URI = "rabbitmq.uri";
+        static final String RABBIT_PRIORITY_QUEUES = "rabbitmq.priority-queues";
 
         static final List<String> ALL = List.of(RUN_ID, SEED, HORIZON_S, RHO, SERVERS, MIX, RATE_PRIORITY,
                 RATE_NORMAL, MEAN_PRIORITY, MEAN_NORMAL, SLICES_PRIORITY, SLICES_NORMAL, TRACE_FILE, BACKEND,
-                QUEUE_PRIORITY, QUEUE_NORMAL, VISIBILITY_MS, SQS_ENDPOINT, SQS_REGION);
+                QUEUE_PRIORITY, QUEUE_NORMAL, VISIBILITY_MS, SQS_ENDPOINT, SQS_REGION, RABBIT_URI,
+                RABBIT_PRIORITY_QUEUES);
 
         private Keys() {
         }

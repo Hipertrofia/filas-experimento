@@ -7,6 +7,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":adapter-local"))
     implementation(project(":adapter-sqs"))
+    implementation(project(":adapter-rabbitmq"))
     runtimeOnly(libs.slf4j.simple)
 
     testImplementation(platform(libs.junit.bom))

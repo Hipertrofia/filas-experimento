@@ -13,6 +13,12 @@ mkdir -p "registros/$rotulo"
 
 export SQS_REGION="$REGION"
 export JAVA_OPTS="-Xms512m -Xmx512m -XX:+AlwaysPreTouch"
+# Com RabbitMQ, URI e senha vêm do objeto que o broker grava no bucket ao subir.
+if grep -qi '^[[:space:]]*queue.backend[[:space:]]*=[[:space:]]*rabbitmq' "$cfg"; then
+    RABBITMQ_URI=$(aws s3 cp "s3://$BUCKET/broker/rabbitmq.env" - | sed -n 's/^RABBITMQ_URI=//p')
+    [[ -n "$RABBITMQ_URI" ]] || { echo "sem broker/rabbitmq.env no bucket" >&2; exit 1; }
+    export RABBITMQ_URI
+fi
 
 rc=0
 app/generator-app/bin/generator-app send "$cfg" 2>&1 | tee "registros/$rotulo/gerador.log" || rc=$?
