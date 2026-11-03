@@ -11,10 +11,12 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Stream;
@@ -27,6 +29,7 @@ import java.util.stream.Stream;
  * @param incomplete      jobs pai com fatias faltando, fora da análise
  * @param negativeWaits   fatias com {@code start < enqueue}: sinal de desvio de relógio entre gerador e pod
  * @param allJobs         jobs completos, aquecimento incluído (a réplica ideal precisa do estado inicial)
+ * @param workerClasses   classes que cada worker atendeu na rodada: mostra como os pods foram divididos
  */
 record RunData(
         Set<String> runIds,
@@ -41,7 +44,8 @@ record RunData(
         long windowEndUs,
         List<JobOutcome> jobs,
         List<JobOutcome> allJobs,
-        Delivery delivery) {
+        Delivery delivery,
+        Map<String, Set<JobClass>> workerClasses) {
 
     /**
      * Job pai. {@code waitUs} soma as esperas de todas as fatias e {@code serviceUs} os
@@ -164,7 +168,15 @@ record RunData(
         long end = kept.get(kept.size() - 1).enqueueUs();
         return new RunData(runIds, policies, workers, obs.size(), duplicates, incomplete,
                 all.size() - kept.size(), negativeWaits, cut, end, kept, List.copyOf(all),
-                Delivery.of(first.values(), cut));
+                Delivery.of(first.values(), cut), workerClasses(first.values()));
+    }
+
+    private static Map<String, Set<JobClass>> workerClasses(Iterable<Observation> obs) {
+        Map<String, Set<JobClass>> m = new TreeMap<>();
+        for (Observation o : obs) {
+            m.computeIfAbsent(o.workerId(), w -> EnumSet.noneOf(JobClass.class)).add(o.jobClass());
+        }
+        return m;
     }
 
     double windowSeconds() {

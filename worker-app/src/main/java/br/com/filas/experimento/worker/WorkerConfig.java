@@ -86,18 +86,17 @@ public record WorkerConfig(
     }
 
     /**
-     * No RabbitMQ cada worker consome uma fila só (push, prefetch = 1), e a prioridade vem da
-     * própria fila ({@code x-max-priority}), não da ordem de consulta.
+     * No RabbitMQ, com uma fila o worker consome por push (prefetch = 1) e a prioridade vem da
+     * própria fila ({@code x-max-priority}); com duas ou mais, faz pull na ordem de consulta.
      */
     private static void checkRabbit(ConsumptionPolicy policy, List<QueueId> queues, Set<QueueId> priorityQueues) {
-        if (queues.size() != 1) {
-            throw new IllegalArgumentException("com queue.backend=RABBITMQ o worker consome exatamente uma fila "
-                    + "(a prioridade vem de " + Keys.RABBIT_PRIORITY_QUEUES + "): " + queues);
+        if (queues.size() > 1) {
+            return;
         }
         boolean prio = priorityQueues.contains(queues.get(0));
         if (policy == ConsumptionPolicy.PRIORIDADE && !prio) {
-            throw new IllegalArgumentException("PRIORIDADE no RabbitMQ: a fila " + queues.get(0)
-                    + " precisa estar em " + Keys.RABBIT_PRIORITY_QUEUES);
+            throw new IllegalArgumentException("PRIORIDADE no RabbitMQ com uma fila: " + queues.get(0)
+                    + " precisa estar em " + Keys.RABBIT_PRIORITY_QUEUES + " (ou use duas filas, por pull)");
         }
         if (policy == ConsumptionPolicy.FIFO_COMPARTILHADO && prio) {
             throw new IllegalArgumentException("FIFO_COMPARTILHADO no RabbitMQ: a fila " + queues.get(0)

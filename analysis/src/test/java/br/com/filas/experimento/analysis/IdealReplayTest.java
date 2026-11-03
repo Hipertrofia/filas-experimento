@@ -43,6 +43,41 @@ class IdealReplayTest {
         reproduzOSimulador(ConsumptionPolicy.PRIORIDADE, 3);
     }
 
+    @Test
+    void poolsDisjuntosSaoFilasIndependentes() {
+        RunData d = RunData.of(QueueSimulator.run(CLASSES, 2, ConsumptionPolicy.PRIORIDADE, 300, 11), Duration.ZERO);
+        Map<UUID, Long> juntos = IdealReplay.waits(d.allJobs(),
+                List.of(List.of(JobClass.PRIORITY), List.of(JobClass.NORMAL), List.of(JobClass.NORMAL)), false,
+                RunData.JobOutcome::serviceUs);
+        for (JobClass k : JobClass.values()) {
+            List<RunData.JobOutcome> so = d.allJobs().stream().filter(j -> j.jobClass() == k).toList();
+            Map<UUID, Long> separado = IdealReplay.waits(so, k == JobClass.PRIORITY ? 1 : 2, false,
+                    RunData.JobOutcome::serviceUs);
+            so.forEach(j -> assertEquals(separado.get(j.parentJobId()), juntos.get(j.parentJobId()), k + " " + j.parentJobId()));
+        }
+    }
+
+    private static RunData.JobOutcome job(long n, JobClass c, long enqueue, long service) {
+        return new RunData.JobOutcome(new UUID(0, n), c, 1, enqueue, enqueue + service, 0, service, service);
+    }
+
+    @Test
+    void reservadoAjudaANormalEDeixaOPrioritarioEsperarOTermino() {
+        // Pod 0 reservado (prioritária, depois normal); pod 1 só normal.
+        List<RunData.JobOutcome> jobs = List.of(
+                job(1, JobClass.NORMAL, 0, 100),      // pod 0 (livre há mais tempo, desempate pelo índice)
+                job(2, JobClass.NORMAL, 10, 100),     // pod 1
+                job(3, JobClass.PRIORITY, 20, 10),    // espera o pod 0 terminar em 100
+                job(4, JobClass.NORMAL, 30, 50));     // espera o pod 1 terminar em 110
+        Map<UUID, Long> w = IdealReplay.waits(jobs,
+                List.of(List.of(JobClass.PRIORITY, JobClass.NORMAL), List.of(JobClass.NORMAL)), false,
+                RunData.JobOutcome::serviceUs);
+        assertEquals(0L, w.get(new UUID(0, 1)));
+        assertEquals(0L, w.get(new UUID(0, 2)));
+        assertEquals(80L, w.get(new UUID(0, 3)));
+        assertEquals(80L, w.get(new UUID(0, 4)));
+    }
+
     private static Observation obs(long n, JobClass c, String worker, long enqueue, long start, long end) {
         UUID id = new UUID(0, n);
         return new Observation(id, "r", c, end - start, T0 + enqueue, T0 + start, T0 + start, T0 + end,

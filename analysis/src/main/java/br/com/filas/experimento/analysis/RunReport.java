@@ -5,7 +5,10 @@ import br.com.filas.experimento.domain.JobClass;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -78,27 +81,65 @@ record RunReport(
         } else if (data.policies().equals(Set.of(ConsumptionPolicy.PRIORIDADE))) {
             model = Optional.of(Theory.Model.PRIORITY);
             note = model.get().label(c);
+        } else if (data.policies().equals(Set.of(ConsumptionPolicy.FAST_LANE_FISICA)) && dedicatedPools(data)) {
+            // Pools disjuntos: cada classe é uma fila FIFO independente com os seus pods.
+            model = Optional.of(Theory.Model.FIFO);
+            note = "FIFO por pool, cada classe com os seus pods:";
+            for (JobClass k : classes.keySet()) {
+                int pool = poolSize(data, k);
+                note += " " + k + " c=" + pool + " (" + Theory.Model.FIFO.label(pool) + ")";
+            }
+        } else if (data.policies().equals(Set.of(ConsumptionPolicy.RESERVADO))) {
+            note = "sem fórmula fechada para RESERVADO; compare com a réplica ideal";
         } else {
             note = "sem fórmula para a política " + data.policies() + " (use --model)";
         }
-        Map<JobClass, Theory.Prediction> theory = model
-                .map(m -> Theory.predict(m, inputs, c))
-                .orElse(Map.of());
-        if (model.isPresent() && theory.isEmpty()) {
+        Map<JobClass, Theory.Prediction> theory = new EnumMap<>(JobClass.class);
+        if (model.isPresent() && note.startsWith("FIFO por pool")) {
+            for (Theory.ClassInput in : inputs) {
+                theory.putAll(Theory.predict(Theory.Model.FIFO, List.of(in), poolSize(data, in.jobClass())));
+            }
+        } else if (model.isPresent()) {
+            theory.putAll(Theory.predict(model.get(), inputs, c));
+        }
+        if (model.isPresent() && theory.size() < inputs.size()) {
             note += String.format(Locale.ROOT, "; instável com ρ = %.3f", rho);
         }
-        return new RunReport(file, data, c, basis, model, note, rho, classes, theory, ideal(data, c, basis, model));
+        return new RunReport(file, data, c, basis, model, note, rho, classes, theory, ideal(data, c, basis, choice));
     }
 
-    /** Réplica ideal com a disciplina do modelo escolhido; sem modelo ou com fatiamento, não há. */
-    private static Map<JobClass, ClassIdeal> ideal(RunData data, int c, ServiceBasis basis,
-                                                   Optional<Theory.Model> model) {
-        if (model.isEmpty() || data.sliced()) {
+    /** Cada worker atende uma classe só, e toda classe tem pods. */
+    private static boolean dedicatedPools(RunData data) {
+        return data.workerClasses().values().stream().allMatch(s -> s.size() == 1)
+                && data.jobs().stream().allMatch(j -> poolSize(data, j.jobClass()) > 0);
+    }
+
+    private static int poolSize(RunData data, JobClass k) {
+        return (int) data.workerClasses().values().stream().filter(s -> s.equals(Set.of(k))).count();
+    }
+
+    /** Todos os pods atendem todas as classes que aparecem: a conservação de Kleinrock vale. */
+    boolean sharedPool() {
+        return data.workerClasses().values().stream().allMatch(s -> s.containsAll(classes.keySet()));
+    }
+
+    /**
+     * Réplica ideal com a disciplina da rodada: FIFO entre as classes em {@code FIFO_COMPARTILHADO},
+     * prioritária primeiro nas demais. Os pods são os do registro, cada um com as classes que
+     * atendeu; com {@code --servers} diferente do número de workers, c pods iguais.
+     */
+    private static Map<JobClass, ClassIdeal> ideal(RunData data, int c, ServiceBasis basis, ModelChoice choice) {
+        if (data.sliced() || choice == ModelChoice.NONE || data.policies().size() != 1) {
             return Map.of();
         }
+        boolean fifo = choice == ModelChoice.FIFO
+                || (choice == ModelChoice.AUTO && data.policies().contains(ConsumptionPolicy.FIFO_COMPARTILHADO));
+        List<List<JobClass>> pools = data.workerClasses().size() == c
+                ? data.workerClasses().values().stream().map(List::copyOf).toList()
+                : Collections.nCopies(c, List.of(JobClass.values()));
         ToLongFunction<RunData.JobOutcome> service = basis == ServiceBasis.MEASURED
                 ? RunData.JobOutcome::serviceUs : RunData.JobOutcome::nominalUs;
-        Map<UUID, Long> waits = IdealReplay.waits(data.allJobs(), c, model.get() == Theory.Model.PRIORITY, service);
+        Map<UUID, Long> waits = IdealReplay.waits(data.allJobs(), pools, fifo, service);
         Map<JobClass, ClassIdeal> out = new EnumMap<>(JobClass.class);
         for (JobClass k : JobClass.values()) {
             List<RunData.JobOutcome> js = data.jobs().stream().filter(j -> j.jobClass() == k).toList();
@@ -136,6 +177,12 @@ record RunReport(
         if (d.runIds().size() > 1) {
             sb.append("ATENÇÃO: mais de um run_id no mesmo arquivo\n");
         }
+        Map<Set<JobClass>, Long> pools = new LinkedHashMap<>();
+        d.workerClasses().values().stream().sorted(Comparator.comparingInt(Set::size))
+                .forEach(s -> pools.merge(s, 1L, Long::sum));
+        sb.append("pods por classes atendidas:");
+        pools.forEach((s, n) -> sb.append(' ').append(n).append("× ").append(s));
+        sb.append('\n');
         sb.append(String.format(Locale.ROOT, "%n%-8s %-6s %7s %8s %9s %9s %10s %12s %9s %9s %12s %9s%n",
                 "classe", "", "n", "λ (1/s)", "E[S]", "E[S²]", "E[Wq]", "E[Wq²]", "p99 Wq", "E[W]", "E[W²]",
                 "p99 W"));
@@ -170,7 +217,7 @@ record RunReport(
             sb.append("; ideal: mesmas chegadas e serviços, sem overhead de entrega");
         }
         sb.append('\n');
-        if (ideal.keySet().equals(classes.keySet()) && !ideal.isEmpty()) {
+        if (ideal.keySet().equals(classes.keySet()) && !ideal.isEmpty() && sharedPool()) {
             double measured = 0;
             double replay = 0;
             for (ClassResult r : classes.values()) {

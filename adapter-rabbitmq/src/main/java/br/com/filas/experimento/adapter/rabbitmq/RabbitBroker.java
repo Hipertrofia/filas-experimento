@@ -12,9 +12,9 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
 
@@ -82,14 +82,22 @@ public final class RabbitBroker implements AutoCloseable {
         }
     }
 
-    /** Fila de um worker: consome {@code queue}, esperando até {@code wait} em cada receive. */
+    /** Fila de um worker: consome {@code queue} por push, esperando até {@code wait} em cada receive. */
     public RabbitJobQueue consumer(QueueId queue, Duration wait) {
-        return new RabbitJobQueue(channel(), Optional.of(queue), wait);
+        return new RabbitJobQueue(channel(), List.of(queue), wait);
+    }
+
+    /** Fila de um worker que consulta várias filas em ordem, por pull ({@code basic.get}). */
+    public RabbitJobQueue poller(List<QueueId> queues) {
+        if (queues.size() < 2) {
+            throw new IllegalArgumentException("pull é para duas ou mais filas; com uma, use consumer: " + queues);
+        }
+        return new RabbitJobQueue(channel(), queues, Duration.ZERO);
     }
 
     /** Fila só para envio (gerador). */
     public RabbitJobQueue publisher() {
-        return new RabbitJobQueue(channel(), Optional.empty(), Duration.ZERO);
+        return new RabbitJobQueue(channel(), List.of(), Duration.ZERO);
     }
 
     static int priorityOf(JobClass c) {

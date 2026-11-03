@@ -87,13 +87,15 @@ public final class Wiring {
         return assemble(cfg, id -> queue, clock, feeders, drained, () -> { });
     }
 
-    /** Uma conexão por processo e um canal por worker: o prefetch = 1 vale por thread. */
+    /**
+     * Uma conexão por processo e um canal por worker: o prefetch = 1 vale por thread. Com uma
+     * fila, push; com mais de uma, pull na ordem de {@code worker.queues}.
+     */
     private static WorkerRuntime rabbit(WorkerConfig cfg, Clock clock) throws IOException {
         RabbitBroker broker = RabbitBroker.connect(cfg.rabbitUri(), cfg.rabbitPriorityQueues(), cfg.workerId());
         List<RabbitJobQueue> channels = new ArrayList<>();
         try {
             broker.declare(cfg.queues());
-            QueueId queue = cfg.queues().get(0);
             AutoCloseable closeAll = () -> {
                 try {
                     channels.forEach(RabbitJobQueue::close);
@@ -102,7 +104,9 @@ public final class Wiring {
                 }
             };
             return assemble(cfg, id -> {
-                RabbitJobQueue q = broker.consumer(queue, cfg.defaultWait());
+                RabbitJobQueue q = cfg.queues().size() == 1
+                        ? broker.consumer(cfg.queues().get(0), cfg.defaultWait())
+                        : broker.poller(cfg.queues());
                 channels.add(q);
                 return q;
             }, clock, List.of(), null, closeAll);

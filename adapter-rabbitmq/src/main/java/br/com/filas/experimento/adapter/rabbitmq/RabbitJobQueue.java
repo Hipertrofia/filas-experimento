@@ -9,6 +9,7 @@ import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
 import com.rabbitmq.client.Envelope;
+import com.rabbitmq.client.GetResponse;
 import com.rabbitmq.client.ShutdownSignalException;
 
 import java.io.IOException;
@@ -16,6 +17,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Date;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
@@ -34,8 +36,10 @@ import java.util.concurrent.TimeoutException;
  * entrega por até {@code wait}; o valor não afeta a medição, só a rapidez com que o worker vê um
  * pedido de parada.
  *
- * <p>Um worker consome uma fila só. Consumir duas no mesmo canal deixaria o broker escolher entre
- * elas, sem ordem de preferência.
+ * <p>Com mais de uma fila (o pod reservado de {@code RESERVADO}), o worker passa a fazer pull:
+ * {@code basic.get} em cada fila, na ordem do {@code WorkerLoop}, como no SQS. Consumir as duas
+ * por push no mesmo canal deixaria o broker escolher entre elas, sem ordem de preferência. O
+ * {@code basic.get} não espera: {@code worker.idle-pause-ms} limita a taxa quando todas vêm vazias.
  *
  * <p>{@code receive_count}: o RabbitMQ só informa se a mensagem é reentrega, então vale 1 ou 2.
  * Corpo malformado: a mensagem é rejeitada sem requeue (senão, com prefetch = 1, travaria o canal).
@@ -48,15 +52,17 @@ public final class RabbitJobQueue implements JobQueue, AutoCloseable {
     private record Delivery(Envelope envelope, byte[] body) { }
 
     private final Channel channel;
-    private final Optional<QueueId> consumed;
+    private final List<QueueId> consumed;
+    private final boolean pull;
     private final long waitNanos;
     private final BlockingQueue<Delivery> deliveries = new LinkedBlockingQueue<>();
     private volatile String failure;
     private boolean consuming;
 
-    RabbitJobQueue(Channel channel, Optional<QueueId> consumed, Duration wait) {
+    RabbitJobQueue(Channel channel, List<QueueId> consumed, Duration wait) {
         this.channel = Objects.requireNonNull(channel, "channel");
-        this.consumed = Objects.requireNonNull(consumed, "consumed");
+        this.consumed = List.copyOf(consumed);
+        this.pull = this.consumed.size() > 1;
         if (wait.isNegative()) {
             throw new IllegalArgumentException("espera negativa: " + wait);
         }
@@ -69,22 +75,12 @@ public final class RabbitJobQueue implements JobQueue, AutoCloseable {
 
     @Override
     public Optional<ReceivedMessage> receive(QueueId queue) {
-        if (consumed.isEmpty() || !consumed.get().equals(queue)) {
-            throw new IllegalArgumentException("este worker consome " + consumed.map(QueueId::name).orElse("nenhuma fila")
+        if (!consumed.contains(queue)) {
+            throw new IllegalArgumentException("este worker consome " + (consumed.isEmpty() ? "nenhuma fila" : consumed)
                     + ", não " + queue);
         }
-        startConsuming(queue);
-        Delivery d;
-        try {
-            d = deliveries.poll(waitNanos, TimeUnit.NANOSECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return Optional.empty();
-        }
+        Delivery d = pull ? get(queue) : next(queue);
         if (d == null) {
-            if (failure != null) {
-                throw new IllegalStateException("consumo de " + queue + " encerrado: " + failure);
-            }
             return Optional.empty();
         }
         long tag = d.envelope().getDeliveryTag();
@@ -141,6 +137,31 @@ public final class RabbitJobQueue implements JobQueue, AutoCloseable {
                 // canal já encerrado pelo broker
             }
         }
+    }
+
+    private Delivery get(QueueId queue) {
+        GetResponse r;
+        try {
+            r = channel.basicGet(queue.name(), false);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return r == null ? null : new Delivery(r.getEnvelope(), r.getBody());
+    }
+
+    private Delivery next(QueueId queue) {
+        startConsuming(queue);
+        Delivery d;
+        try {
+            d = deliveries.poll(waitNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        if (d == null && failure != null) {
+            throw new IllegalStateException("consumo de " + queue + " encerrado: " + failure);
+        }
+        return d;
     }
 
     private void startConsuming(QueueId queue) {

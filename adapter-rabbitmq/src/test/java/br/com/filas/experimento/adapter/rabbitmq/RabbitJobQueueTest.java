@@ -201,6 +201,30 @@ class RabbitJobQueueTest {
     }
 
     @Test
+    void duasFilasPorPullNaOrdemPedida() throws Exception {
+        QueueId prio = uniqueQueue("pull-prio");
+        QueueId normal = uniqueQueue("pull-normal");
+        try (RabbitBroker broker = RabbitBroker.connect(uri, Set.of(), "teste")) {
+            broker.declare(List.of(prio, normal));
+            try (RabbitJobQueue pub = broker.publisher()) {
+                pub.send(job(JobClass.NORMAL, 1), normal);
+                pub.send(job(JobClass.PRIORITY, 2), prio);
+            }
+            try (RabbitJobQueue worker = broker.poller(List.of(prio, normal))) {
+                ReceivedMessage p = worker.receive(prio).orElseThrow();
+                assertEquals("teste-2", p.job().runId());
+                assertEquals(prio, p.queue());
+                worker.acknowledge(p);
+                assertTrue(worker.receive(prio).isEmpty(), "basic.get vazio volta na hora");
+                ReceivedMessage n = worker.receive(normal).orElseThrow();
+                assertEquals(normal, n.queue());
+                worker.acknowledge(n);
+            }
+            assertEquals(0, ready(prio) + ready(normal));
+        }
+    }
+
+    @Test
     void declaracaoComArgumentosDiferentesFalha() {
         QueueId q = uniqueQueue("conflito");
         try (RabbitBroker fifo = RabbitBroker.connect(uri, Set.of(), "teste")) {

@@ -91,7 +91,7 @@ class WorkerConfigTest {
 
         Map<String, String> duas = new HashMap<>(m);
         duas.put("worker.queues", "jobs,outra");
-        assertThrows(IllegalArgumentException.class, () -> WorkerConfig.from(duas));
+        assertEquals(2, WorkerConfig.from(duas).queues().size(), "duas filas: pull");
 
         Map<String, String> prioSemDeclarar = new HashMap<>(m);
         prioSemDeclarar.remove("rabbitmq.priority-queues");
